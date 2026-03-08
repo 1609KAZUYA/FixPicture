@@ -1,0 +1,24 @@
+name: CMake Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset win64
+      - name: Build
+        run: cmake --build --preset build-win64
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset macos
+      - name: Build
+        run: cmake --build --preset build-macos
