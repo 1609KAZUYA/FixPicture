@@ -11,8 +11,21 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#include "stb_image_resize.h"
+#if defined(__has_include)
+#  if __has_include("stb_image_resize2.h")
+#    define IMAGETOOL_USE_STB_RESIZE2 1
+#    define STB_IMAGE_RESIZE2_IMPLEMENTATION
+#    include "stb_image_resize2.h"
+#  elif __has_include("stb_image_resize.h")
+#    define STB_IMAGE_RESIZE_IMPLEMENTATION
+#    include "stb_image_resize.h"
+#  else
+#    error "Neither stb_image_resize2.h nor stb_image_resize.h is available"
+#  endif
+#else
+#  define STB_IMAGE_RESIZE_IMPLEMENTATION
+#  include "stb_image_resize.h"
+#endif
 
 static void img_reset(Image* img) {
   if (!img) {
@@ -75,6 +88,37 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
     return -5;
   }
 
+#if defined(IMAGETOOL_USE_STB_RESIZE2)
+  stbir_pixel_layout layout = STBIR_1CHANNEL;
+  switch (src->channels) {
+    case 1:
+      layout = STBIR_1CHANNEL;
+      break;
+    case 2:
+      layout = STBIR_2CHANNEL;
+      break;
+    case 3:
+      layout = STBIR_RGB;
+      break;
+    case 4:
+      layout = STBIR_RGBA;
+      break;
+    default:
+      free(dst);
+      return -7;
+  }
+
+  const int ok = stbir_resize_uint8_linear(
+      src->pixels,
+      src->w,
+      src->h,
+      0,
+      dst,
+      new_w,
+      new_h,
+      0,
+      layout);
+#else
   const int ok = stbir_resize_uint8(
       src->pixels,
       src->w,
@@ -85,6 +129,7 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
       new_h,
       0,
       src->channels);
+#endif
 
   if (!ok) {
     free(dst);
