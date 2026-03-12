@@ -146,8 +146,8 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
       return -7;
   }
 
-  // ok: stb が dst へのリサイズ書き込みに成功したとき非0になります。 / ok: non-zero when stb successfully writes resized pixels into dst.
-  const int ok = stbir_resize_uint8_linear(
+  // resized_pixels: 成功時は出力先バッファ dst を返し、失敗時は NULL を返します。 / resized_pixels: returns the destination buffer on success and NULL on failure.
+  unsigned char* resized_pixels = stbir_resize_uint8_linear(
       src->pixels,
       src->w,
       src->h,
@@ -157,6 +157,7 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
       new_h,
       0,
       layout);
+  const int ok = (resized_pixels != NULL);
 #else
   // 従来APIではチャンネル数をそのまま渡します。 / Legacy resize API accepts the channel count directly.
   const int ok = stbir_resize_uint8(

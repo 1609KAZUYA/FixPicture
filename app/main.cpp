@@ -281,7 +281,7 @@ static void draw_ui(AppState& state) {
         state.preview_texture.width * scale,
         state.preview_texture.height * scale);
 
-    ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(state.preview_texture.id)), size);
+    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(state.preview_texture.id)), size);
   } else {
     ImGui::TextUnformatted("No image selected.");
   }
