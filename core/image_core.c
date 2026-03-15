@@ -1,80 +1,165 @@
+// C++ UI層と共有する公開API宣言を取り込みます。 / Include the public Image type and function declarations shared with the C++ UI layer.
 #include "image_core.h"
 
+// 計算したバッファサイズが stb の int ベースAPIで扱える範囲か確認するために使います。 / INT_MAX is used when checking whether the computed buffer size still fits into the integer-based APIs exposed by stb.
 #include <limits.h>
+// 安全なバイト数計算のために size_t と SIZE_MAX を使います。 / size_t and SIZE_MAX are used for safe byte-count calculations.
 #include <stddef.h>
+// リサイズ後の出力バッファを確保・解放するために malloc と free を使います。 / malloc and free are used for the destination resize buffer.
 #include <stdlib.h>
+// 将来このファイルで低レベルなメモリ操作が増えた場合に備えて含めています。 / Kept available for low-level memory utilities if this file grows later.
 #include <string.h>
 
+// stb_image の実装本体をこの翻訳単位で有効化し、別の .c を用意せず画像読込関数を使えるようにします。 / Emit stb_image implementation in this translation unit so image loading functions become available without a separate .c file from stb.
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+// PNG書き出しのために stb_image_write の実装本体もここで有効化します。 / Emit stb_image_write implementation here for PNG export support.
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#include "stb_image_resize.h"
+#if defined(__has_include)
+#  if __has_include("stb_image_resize2.h")
+    // 新しい stb では v2 API が入ることがあるため、利用可能なら stb_image_resize2 を優先します。 / Prefer stb_image_resize2 when available because newer stb snapshots may ship the v2 API instead of the legacy header.
+#    define IMAGETOOL_USE_STB_RESIZE2 1
+#    define STB_IMAGE_RESIZE2_IMPLEMENTATION
+#    include "stb_image_resize2.h"
+#  elif __has_include("stb_image_resize.h")
+    // resize2 が無い環境では従来のリサイズAPIへフォールバックします。 / Fall back to the classic resize API when resize2 is not present.
+#    define STB_IMAGE_RESIZE_IMPLEMENTATION
+#    include "stb_image_resize.h"
+#  else
+#    error "Neither stb_image_resize2.h nor stb_image_resize.h is available"
+#  endif
+#else
+  // __has_include を持たないコンパイラでは従来ヘッダを直接使います。 / Compilers without __has_include use the legacy header path directly.
+#  define STB_IMAGE_RESIZE_IMPLEMENTATION
+#  include "stb_image_resize.h"
+#endif
 
+// すべてのフィールドを初期状態へ戻し、エラー時や解放後に中途半端な状態を見せないようにします。 / Reset every field in Image so callers never observe partially initialized state after an error path or after explicit cleanup.
 static void img_reset(Image* img) {
+  // NULL が来ても安全に何もしないようにします。 / Ignore NULL input so callers can safely forward optional pointers.
   if (!img) {
     return;
   }
 
+  // 読み込み済みまたはリサイズ済み画像の横幅です。 / Pixel width of the loaded/resized image.
   img->w = 0;
+  // 読み込み済みまたはリサイズ済み画像の縦幅です。 / Pixel height of the loaded/resized image.
   img->h = 0;
+  // ピクセルバッファに入っている色チャンネル数です。 / Number of color channels stored in pixels.
   img->channels = 0;
+  // Image が所有するヒープバッファです。NULL は画像データ未保持を意味します。 / Heap buffer owned by Image. NULL means "no image data".
   img->pixels = NULL;
 }
 
 int img_load_rgba(const char* path, Image* out) {
+  // path: 読み込む元画像のファイルパスです。 / path: filesystem path to the source image.
+  // out: デコード結果を受け取る呼び出し側所有の Image 構造体です。 / out: caller-owned Image struct that receives the decoded result.
   if (!path || !out) {
     return -1;
   }
 
+  // 呼び出し側が古い Image を再利用していても安全なように、まず空状態へ戻します。 / Start from a known empty state in case the caller reused an old Image.
   img_reset(out);
 
+  // w: stb_image が返すデコード後の横幅です。 / w: decoded source width returned by stb_image.
   int w = 0;
+  // h: stb_image が返すデコード後の縦幅です。 / h: decoded source height returned by stb_image.
   int h = 0;
+  // channels: RGBA固定化する前の元画像のチャンネル数です。 / channels: original channel count before forcing RGBA output.
   int channels = 0;
 
+  // stbi_load はファイルをデコードし、ピクセル用ヒープバッファを確保します。 / stbi_load decodes the file and allocates a heap buffer.
+  // 最後の引数に 4 を渡すことで出力を常に RGBA に揃え、後続処理を単純化します。 / The final argument forces 4 output channels, so every loaded image is normalized to RGBA for simpler downstream handling.
   uint8_t* data = stbi_load(path, &w, &h, &channels, 4);
   if (!data) {
     return -2;
   }
 
+  // 取得した画像メタデータとバッファを呼び出し側の Image に格納します。 / Store the decoded metadata and buffer in the caller's Image object.
   out->w = w;
   out->h = h;
   out->channels = 4;
   out->pixels = data;
 
+  // このAPI群では 0 を成功コードとして統一しています。 / 0 is the success code used consistently across this API.
   return 0;
 }
 
 int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
+  // src: すでにメモリ上へ読み込まれている元画像です。 / src: source image already loaded in memory.
+  // new_w/new_h: 出力したい新しいサイズです。 / new_w/new_h: requested output size in pixels.
+  // out: リサイズ後画像を受け取り、確保された出力バッファを所有します。 / out: receives the resized image and owns the allocated destination buffer.
   if (!src || !src->pixels || !out) {
     return -1;
   }
 
+  // 不正なサイズやチャンネル数は早い段階で弾きます。 / Reject invalid geometry and invalid channel counts early.
   if (new_w <= 0 || new_h <= 0 || src->channels <= 0) {
     return -2;
   }
 
+  // メモリ確保前に出力先を空状態へ初期化しておきます。 / Clear the destination object before any allocation attempt.
   img_reset(out);
 
+  // pixel_count: リサイズ後画像に含まれる総ピクセル数です。 / pixel_count: total number of pixels in the resized image.
   size_t pixel_count = (size_t)new_w * (size_t)new_h;
+  // `pixel_count * channels` でオーバーフローしないか確認します。 / Guard against overflow in "pixel_count * channels".
   if (pixel_count > (SIZE_MAX / (size_t)src->channels)) {
     return -3;
   }
 
+  // bytes: 出力バッファに必要な総バイト数です。 / bytes: number of bytes required for the resized output buffer.
   size_t bytes = pixel_count * (size_t)src->channels;
+  // stb 側に int サイズ前提のAPIがあるため、実用上その上限を超えるサイズは拒否します。 / Some stb entry points still use int-sized parameters, so reject sizes that exceed that practical limit.
   if (bytes > (size_t)INT_MAX) {
     return -4;
   }
 
+  // dst: 成功時にリサイズ後ピクセルを書き込むヒープバッファです。 / dst: heap buffer that will hold the resized pixels on success.
   uint8_t* dst = (uint8_t*)malloc(bytes);
   if (!dst) {
     return -5;
   }
 
+#if defined(IMAGETOOL_USE_STB_RESIZE2)
+  // resize2 では単なるチャンネル数ではなくレイアウト列挙値が必要なので変換します。 / resize2 selects channel layout explicitly instead of taking raw channel count, so map the Image metadata to the appropriate enum.
+  stbir_pixel_layout layout = STBIR_1CHANNEL;
+  switch (src->channels) {
+    case 1:
+      layout = STBIR_1CHANNEL;
+      break;
+    case 2:
+      layout = STBIR_2CHANNEL;
+      break;
+    case 3:
+      layout = STBIR_RGB;
+      break;
+    case 4:
+      layout = STBIR_RGBA;
+      break;
+    default:
+      // resize2 API が扱えないレイアウトなので、所有権を明確にするためバッファを解放して返します。 / Unsupported layout for the resize2 API. Release the buffer before returning so ownership stays clear.
+      free(dst);
+      return -7;
+  }
+
+  // resized_pixels: 成功時は出力先バッファ dst を返し、失敗時は NULL を返します。 / resized_pixels: returns the destination buffer on success and NULL on failure.
+  unsigned char* resized_pixels = stbir_resize_uint8_linear(
+      src->pixels,
+      src->w,
+      src->h,
+      0,
+      dst,
+      new_w,
+      new_h,
+      0,
+      layout);
+  const int ok = (resized_pixels != NULL);
+#else
+  // 従来APIではチャンネル数をそのまま渡します。 / Legacy resize API accepts the channel count directly.
   const int ok = stbir_resize_uint8(
       src->pixels,
       src->w,
@@ -85,12 +170,15 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
       new_h,
       0,
       src->channels);
+#endif
 
+  // 失敗時の dst は使えないため、この場で必ず解放します。 / Any non-success result means dst is unusable and must be released here.
   if (!ok) {
     free(dst);
     return -6;
   }
 
+  // すべて成功した時点でのみ、完成した画像を呼び出し側へ公開します。 / Publish the resized image to the caller only after all operations succeed.
   out->w = new_w;
   out->h = new_h;
   out->channels = src->channels;
@@ -100,10 +188,14 @@ int img_resize_rgba(const Image* src, int new_w, int new_h, Image* out) {
 }
 
 int img_save_png(const char* path, const Image* img) {
+  // path: 保存先ファイルパスです。 / path: destination file path.
+  // img: PNGとしてシリアライズする元画像バッファです。 / img: source image buffer to serialize as PNG.
   if (!path || !img || !img->pixels || img->w <= 0 || img->h <= 0 || img->channels <= 0) {
     return -1;
   }
 
+  // stride: 1行ぶんのバイト数です。 / stride: number of bytes in one scanline.
+  // stb_image_write はこの値を使って元バッファを行単位で走査します。 / stb_image_write uses this to walk row by row through the source buffer.
   const int stride = img->w * img->channels;
   if (!stbi_write_png(path, img->w, img->h, img->channels, img->pixels, stride)) {
     return -2;
@@ -113,13 +205,17 @@ int img_save_png(const char* path, const Image* img) {
 }
 
 void img_free(Image* img) {
+  // img: 内部ヒープバッファを解放したい Image オブジェクトです。 / img: Image object whose internal heap buffer should be released.
   if (!img) {
     return;
   }
 
+  // stbi_image_free は stbi_load が返したバッファに対して有効です。 / stbi_image_free is valid for buffers returned by stbi_load.
+  // このプロジェクトでは stb が標準Cアロケータを使う前提のため、リサイズ後バッファにも同じ解放関数を使っています。 / In this project it is also used for resized buffers because stb defaults to the standard C allocator pair.
   if (img->pixels) {
     stbi_image_free(img->pixels);
   }
 
+  // 再利用時や二重解放防止のため、メタデータも初期状態へ戻します。 / Reset metadata so the struct is safe to reuse and double-free resistant.
   img_reset(img);
 }
