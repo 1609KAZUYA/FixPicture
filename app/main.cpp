@@ -6,12 +6,22 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include "image_core.h"
+
+#if defined(_WIN32)
+#  define NOMINMAX
+#  include <windows.h>
+#  include <commdlg.h>
+#  include <objbase.h>
+#  include <shlobj.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -31,7 +41,8 @@ struct GLTexture {
 };
 
 struct AppState {
-  char dir_input[1024] = "";
+  char path_input[1024] = "";
+  char output_input[1024] = "";
   fs::path current_dir;
   std::vector<fs::path> files;
   int selected_index = -1;
@@ -41,7 +52,7 @@ struct AppState {
 
   int new_width = 0;
   int new_height = 0;
-  std::string status = "Directory is not loaded yet.";
+  std::string status = "No file or directory loaded yet.";
 };
 
 static bool is_supported_image(const fs::path& file_path) {
@@ -55,6 +66,214 @@ static bool is_supported_image(const fs::path& file_path) {
   });
 
   return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
+}
+
+static void load_selected_image(AppState& state, int index);
+
+static void set_path_input(AppState& state, const fs::path& path) {
+  const std::string text = path.string();
+  std::snprintf(state.path_input, sizeof(state.path_input), "%s", text.c_str());
+}
+
+static void set_output_input(AppState& state, const fs::path& path) {
+  const std::string text = path.string();
+  std::snprintf(state.output_input, sizeof(state.output_input), "%s", text.c_str());
+}
+
+static std::string trim_copy(const std::string& text) {
+  size_t start = 0;
+  while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+    ++start;
+  }
+
+  size_t end = text.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+    --end;
+  }
+
+  return text.substr(start, end - start);
+}
+
+static fs::path parse_user_path_input(const char* raw_input) {
+  if (!raw_input) {
+    return fs::path();
+  }
+
+  std::string text = trim_copy(raw_input);
+  if (text.size() >= 2) {
+    const char first = text.front();
+    const char last = text.back();
+    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+      text = text.substr(1, text.size() - 2);
+    }
+  }
+
+  return fs::path(text);
+}
+
+#if defined(_WIN32)
+static std::string wide_to_utf8(const wchar_t* value) {
+  if (!value || value[0] == L'\0') {
+    return std::string();
+  }
+
+  const int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+  if (size <= 1) {
+    return std::string();
+  }
+
+  std::string result(static_cast<size_t>(size - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), size, nullptr, nullptr);
+  return result;
+}
+
+static bool prompt_open_image_file(fs::path& out_path) {
+  static const wchar_t kFilter[] =
+      L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0";
+  wchar_t buffer[4096] = L"";
+  OPENFILENAMEW dialog = {};
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner = nullptr;
+  dialog.lpstrFilter = kFilter;
+  dialog.lpstrFile = buffer;
+  dialog.nMaxFile = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
+  dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  dialog.lpstrTitle = L"Select an image";
+
+  if (!GetOpenFileNameW(&dialog)) {
+    return false;
+  }
+
+  out_path = fs::path(wide_to_utf8(buffer));
+  return !out_path.empty();
+}
+
+static bool prompt_select_directory(fs::path& out_path, const wchar_t* title) {
+  HRESULT init_result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  const bool should_uninit = SUCCEEDED(init_result);
+
+  BROWSEINFOW dialog = {};
+  dialog.lpszTitle = title;
+  dialog.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+
+  PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&dialog);
+  if (!item) {
+    if (should_uninit) {
+      CoUninitialize();
+    }
+    return false;
+  }
+
+  wchar_t buffer[MAX_PATH] = L"";
+  const BOOL ok = SHGetPathFromIDListW(item, buffer);
+  CoTaskMemFree(item);
+
+  if (should_uninit) {
+    CoUninitialize();
+  }
+
+  if (!ok) {
+    return false;
+  }
+
+  out_path = fs::path(wide_to_utf8(buffer));
+  return !out_path.empty();
+}
+#elif defined(__APPLE__)
+static std::string run_command_and_capture(const char* command) {
+  if (!command) {
+    return std::string();
+  }
+
+  FILE* pipe = popen(command, "r");
+  if (!pipe) {
+    return std::string();
+  }
+
+  std::string output;
+  char buffer[512];
+  while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr) {
+    output += buffer;
+  }
+  pclose(pipe);
+  return trim_copy(output);
+}
+
+static bool prompt_open_image_file(fs::path& out_path) {
+  const std::string result = run_command_and_capture(
+      "osascript -e 'POSIX path of (choose file with prompt \"Select an image\")'");
+  if (result.empty()) {
+    return false;
+  }
+
+  out_path = fs::path(result);
+  return true;
+}
+
+static bool prompt_select_directory(fs::path& out_path, const char* title) {
+  const std::string prompt = title ? title : "Select a folder";
+  const std::string command =
+      "osascript -e 'POSIX path of (choose folder with prompt \"" + prompt + "\")'";
+  const std::string result = run_command_and_capture(command.c_str());
+  if (result.empty()) {
+    return false;
+  }
+
+  out_path = fs::path(result);
+  return true;
+}
+#else
+static bool prompt_open_image_file(fs::path& out_path) {
+  (void)out_path;
+  return false;
+}
+
+static bool prompt_select_directory(fs::path& out_path, const char* title) {
+  (void)out_path;
+  (void)title;
+  return false;
+}
+#endif
+
+static fs::path default_output_dir(const AppState& state) {
+  if (!state.current_dir.empty()) {
+    return state.current_dir / "resized_output";
+  }
+
+  return fs::current_path() / "resized_output";
+}
+
+static fs::path get_output_dir(const AppState& state) {
+  const fs::path parsed = parse_user_path_input(state.output_input);
+  if (!parsed.empty()) {
+    return parsed;
+  }
+
+  return default_output_dir(state);
+}
+
+static bool ensure_directory_exists(const fs::path& dir, std::string& status) {
+  std::error_code ec;
+  if (dir.empty()) {
+    status = "Output directory is empty.";
+    return false;
+  }
+
+  if (fs::exists(dir, ec)) {
+    if (ec || !fs::is_directory(dir, ec) || ec) {
+      status = "Output path is not a directory: " + dir.string();
+      return false;
+    }
+
+    return true;
+  }
+
+  if (!fs::create_directories(dir, ec) && ec) {
+    status = "Failed to create output directory: " + dir.string();
+    return false;
+  }
+
+  return true;
 }
 
 static void clear_current_image(AppState& state) {
@@ -101,13 +320,21 @@ static void load_directory(AppState& state, const fs::path& dir) {
   state.selected_index = -1;
   clear_current_image(state);
 
-  if (dir.empty() || !fs::exists(dir) || !fs::is_directory(dir)) {
+  std::error_code ec;
+  if (dir.empty() || !fs::exists(dir, ec) || ec || !fs::is_directory(dir, ec) || ec) {
     state.status = "Directory does not exist.";
     return;
   }
 
-  for (const auto& entry : fs::directory_iterator(dir)) {
-    if (!entry.is_regular_file()) {
+  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    if (ec) {
+      state.status = "Failed to enumerate the directory.";
+      state.files.clear();
+      return;
+    }
+
+    if (!entry.is_regular_file(ec) || ec) {
+      ec.clear();
       continue;
     }
 
@@ -118,8 +345,65 @@ static void load_directory(AppState& state, const fs::path& dir) {
 
   std::sort(state.files.begin(), state.files.end());
   state.current_dir = dir;
+  set_path_input(state, dir);
+  set_output_input(state, default_output_dir(state));
+
+  if (state.files.empty()) {
+    state.status = "No supported images were found in the directory.";
+    return;
+  }
 
   state.status = "Loaded " + std::to_string(state.files.size()) + " image(s).";
+  load_selected_image(state, 0);
+}
+
+static void load_path(AppState& state, const fs::path& input_path) {
+  state.files.clear();
+  state.selected_index = -1;
+  clear_current_image(state);
+
+  std::error_code ec;
+  if (input_path.empty() || !fs::exists(input_path, ec) || ec) {
+    state.status = "Path does not exist.";
+    return;
+  }
+
+  set_path_input(state, input_path);
+
+  if (fs::is_directory(input_path, ec) && !ec) {
+    load_directory(state, input_path);
+    return;
+  }
+
+  ec.clear();
+  if (!fs::is_regular_file(input_path, ec) || ec) {
+    state.status = "The path is neither a readable file nor a directory.";
+    return;
+  }
+
+  if (!is_supported_image(input_path)) {
+    state.status = "Unsupported image format.";
+    return;
+  }
+
+  state.files.push_back(input_path);
+  state.current_dir = input_path.has_parent_path() ? input_path.parent_path() : fs::current_path();
+  set_output_input(state, default_output_dir(state));
+  state.status = "Loaded 1 image.";
+  load_selected_image(state, 0);
+}
+
+static void drop_callback(GLFWwindow* window, int count, const char** paths) {
+  if (!window || count <= 0 || !paths || !paths[0]) {
+    return;
+  }
+
+  AppState* state = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+  if (!state) {
+    return;
+  }
+
+  load_path(*state, fs::path(paths[0]));
 }
 
 static void load_selected_image(AppState& state, int index) {
@@ -175,7 +459,13 @@ static bool resize_selected_and_save(AppState& state) {
   }
 
   const fs::path src = state.files[static_cast<size_t>(state.selected_index)];
-  const fs::path out = make_output_path(state.current_dir, src, state.new_width, state.new_height);
+  const fs::path output_dir = get_output_dir(state);
+  if (!ensure_directory_exists(output_dir, state.status)) {
+    img_free(&resized);
+    return false;
+  }
+
+  const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height);
   const std::string out_str = out.string();
 
   const int rc_save = img_save_png(out_str.c_str(), &resized);
@@ -186,7 +476,7 @@ static bool resize_selected_and_save(AppState& state) {
     return false;
   }
 
-  state.status = "Saved: " + out.filename().string();
+  state.status = "Saved: " + out.string();
   return true;
 }
 
@@ -203,6 +493,10 @@ static void resize_all_and_save(AppState& state) {
 
   int success_count = 0;
   int fail_count = 0;
+  const fs::path output_dir = get_output_dir(state);
+  if (!ensure_directory_exists(output_dir, state.status)) {
+    return;
+  }
 
   for (const auto& src : state.files) {
     Image loaded = {0, 0, 0, nullptr};
@@ -222,7 +516,7 @@ static void resize_all_and_save(AppState& state) {
       continue;
     }
 
-    const fs::path out = make_output_path(state.current_dir, src, state.new_width, state.new_height);
+    const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height);
     const std::string out_str = out.string();
 
     if (img_save_png(out_str.c_str(), &resized) == 0) {
@@ -240,13 +534,35 @@ static void resize_all_and_save(AppState& state) {
 static void draw_ui(AppState& state) {
   ImGui::Begin("Image Resizer");
 
-  ImGui::TextUnformatted("Directory");
-  ImGui::PushItemWidth(-120.0f);
-  ImGui::InputText("##dir", state.dir_input, IM_ARRAYSIZE(state.dir_input));
+  ImGui::TextUnformatted("Path (file or directory)");
+  ImGui::PushItemWidth(-1.0f);
+  ImGui::InputText("##path", state.path_input, IM_ARRAYSIZE(state.path_input));
   ImGui::PopItemWidth();
+
+  if (ImGui::Button("Open File...")) {
+    fs::path selected_path;
+    if (prompt_open_image_file(selected_path)) {
+      load_path(state, selected_path);
+    }
+  }
+
   ImGui::SameLine();
-  if (ImGui::Button("Load")) {
-    load_directory(state, fs::path(state.dir_input));
+
+  if (ImGui::Button("Open Folder...")) {
+    fs::path selected_path;
+#if defined(_WIN32)
+    if (prompt_select_directory(selected_path, L"Select an image folder")) {
+#else
+    if (prompt_select_directory(selected_path, "Select an image folder")) {
+#endif
+      load_path(state, selected_path);
+    }
+  }
+
+  ImGui::SameLine();
+
+  if (ImGui::Button("Load Path")) {
+    load_path(state, parse_user_path_input(state.path_input));
   }
 
   ImGui::Separator();
@@ -286,6 +602,18 @@ static void draw_ui(AppState& state) {
     ImGui::TextUnformatted("No image selected.");
   }
 
+  ImGui::InputText("Output Directory", state.output_input, IM_ARRAYSIZE(state.output_input));
+  ImGui::SameLine();
+  if (ImGui::Button("Choose...")) {
+    fs::path selected_path;
+#if defined(_WIN32)
+    if (prompt_select_directory(selected_path, L"Select output folder")) {
+#else
+    if (prompt_select_directory(selected_path, "Select output folder")) {
+#endif
+      set_output_input(state, selected_path);
+    }
+  }
   ImGui::InputInt("Width", &state.new_width);
   ImGui::InputInt("Height", &state.new_height);
 
@@ -352,6 +680,8 @@ int main() {
   ImGui_ImplOpenGL3_Init(glsl_version);
 
   AppState state;
+  glfwSetWindowUserPointer(window, &state);
+  glfwSetDropCallback(window, drop_callback);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();

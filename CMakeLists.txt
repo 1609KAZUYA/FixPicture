@@ -108,3 +108,7 @@ endif()
 if(APPLE)
   target_compile_definitions(ImageTool PRIVATE GL_SILENCE_DEPRECATION)
 endif()
+
+if(WIN32)
+  target_link_libraries(ImageTool PRIVATE Comdlg32 Ole32 Shell32)
+endif()
