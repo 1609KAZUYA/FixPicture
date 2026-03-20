@@ -27,18 +27,20 @@ if(IMAGETOOL_FETCH_DEPS)
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG 3.4
+    GIT_SHALLOW TRUE
   )
 
   FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG master
+    GIT_TAG v1.91.9b
+    GIT_SHALLOW TRUE
   )
 
   FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
+    GIT_TAG 2fb8c5a3deb2110c89669f8d6f36e5833b556b44
   )
 
   FetchContent_MakeAvailable(glfw imgui stb)
@@ -105,4 +107,9 @@ endif()
 
 if(APPLE)
   target_compile_definitions(ImageTool PRIVATE GL_SILENCE_DEPRECATION)
+  target_link_libraries(image_core PRIVATE "-framework ApplicationServices")
+endif()
+
+if(WIN32)
+  target_link_libraries(ImageTool PRIVATE Comdlg32 Ole32 Shell32)
 endif()
