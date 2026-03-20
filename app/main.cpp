@@ -52,6 +52,9 @@ struct AppState {
 
   int new_width = 0;
   int new_height = 0;
+  int output_format = IMG_FORMAT_PNG;
+  int jpg_quality = 90;
+  bool last_save_succeeded = false;
   std::string status = "No file or directory loaded yet.";
 };
 
@@ -65,7 +68,7 @@ static bool is_supported_image(const fs::path& file_path) {
     return static_cast<char>(std::tolower(c));
   });
 
-  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga";
+  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga" || ext == ".pdf";
 }
 
 static void load_selected_image(AppState& state, int index);
@@ -129,7 +132,7 @@ static std::string wide_to_utf8(const wchar_t* value) {
 
 static bool prompt_open_image_file(fs::path& out_path) {
   static const wchar_t kFilter[] =
-      L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0";
+      L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.pdf\0All Files\0*.*\0";
   wchar_t buffer[4096] = L"";
   OPENFILENAMEW dialog = {};
   dialog.lStructSize = sizeof(dialog);
@@ -243,6 +246,32 @@ static fs::path default_output_dir(const AppState& state) {
   return fs::current_path() / "resized_output";
 }
 
+static const char* output_format_label(int format) {
+  switch (format) {
+    case IMG_FORMAT_PNG:
+      return "PNG";
+    case IMG_FORMAT_JPG:
+      return "JPG";
+    case IMG_FORMAT_PDF:
+      return "PDF";
+    default:
+      return "PNG";
+  }
+}
+
+static const char* output_format_extension(int format) {
+  switch (format) {
+    case IMG_FORMAT_PNG:
+      return ".png";
+    case IMG_FORMAT_JPG:
+      return ".jpg";
+    case IMG_FORMAT_PDF:
+      return ".pdf";
+    default:
+      return ".png";
+  }
+}
+
 static fs::path get_output_dir(const AppState& state) {
   const fs::path parsed = parse_user_path_input(state.output_input);
   if (!parsed.empty()) {
@@ -322,12 +351,14 @@ static void load_directory(AppState& state, const fs::path& dir) {
 
   std::error_code ec;
   if (dir.empty() || !fs::exists(dir, ec) || ec || !fs::is_directory(dir, ec) || ec) {
+    state.last_save_succeeded = false;
     state.status = "Directory does not exist.";
     return;
   }
 
   for (const auto& entry : fs::directory_iterator(dir, ec)) {
     if (ec) {
+      state.last_save_succeeded = false;
       state.status = "Failed to enumerate the directory.";
       state.files.clear();
       return;
@@ -349,10 +380,12 @@ static void load_directory(AppState& state, const fs::path& dir) {
   set_output_input(state, default_output_dir(state));
 
   if (state.files.empty()) {
+    state.last_save_succeeded = false;
     state.status = "No supported images were found in the directory.";
     return;
   }
 
+  state.last_save_succeeded = false;
   state.status = "Loaded " + std::to_string(state.files.size()) + " image(s).";
   load_selected_image(state, 0);
 }
@@ -364,6 +397,7 @@ static void load_path(AppState& state, const fs::path& input_path) {
 
   std::error_code ec;
   if (input_path.empty() || !fs::exists(input_path, ec) || ec) {
+    state.last_save_succeeded = false;
     state.status = "Path does not exist.";
     return;
   }
@@ -377,11 +411,13 @@ static void load_path(AppState& state, const fs::path& input_path) {
 
   ec.clear();
   if (!fs::is_regular_file(input_path, ec) || ec) {
+    state.last_save_succeeded = false;
     state.status = "The path is neither a readable file nor a directory.";
     return;
   }
 
   if (!is_supported_image(input_path)) {
+    state.last_save_succeeded = false;
     state.status = "Unsupported image format.";
     return;
   }
@@ -389,6 +425,7 @@ static void load_path(AppState& state, const fs::path& input_path) {
   state.files.push_back(input_path);
   state.current_dir = input_path.has_parent_path() ? input_path.parent_path() : fs::current_path();
   set_output_input(state, default_output_dir(state));
+  state.last_save_succeeded = false;
   state.status = "Loaded 1 image.";
   load_selected_image(state, 0);
 }
@@ -417,12 +454,18 @@ static void load_selected_image(AppState& state, int index) {
   const std::string file_str = state.files[static_cast<size_t>(index)].string();
   const int rc = img_load_rgba(file_str.c_str(), &loaded);
   if (rc != 0) {
-    state.status = "Failed to load image: " + file_str;
+    state.last_save_succeeded = false;
+    if (rc == -10) {
+      state.status = "PDF loading is not supported on this platform yet.";
+    } else {
+      state.status = "Failed to load image: " + file_str;
+    }
     return;
   }
 
   if (!upload_to_texture(state.preview_texture, loaded)) {
     img_free(&loaded);
+    state.last_save_succeeded = false;
     state.status = "Failed to upload OpenGL texture.";
     return;
   }
@@ -431,22 +474,26 @@ static void load_selected_image(AppState& state, int index) {
   state.selected_index = index;
   state.new_width = loaded.w;
   state.new_height = loaded.h;
+  state.last_save_succeeded = false;
   state.status = "Loaded: " + state.files[static_cast<size_t>(index)].filename().string();
 }
 
-static fs::path make_output_path(const fs::path& base_dir, const fs::path& src_path, int w, int h) {
+static fs::path make_output_path(const fs::path& base_dir, const fs::path& src_path, int w, int h, int output_format) {
   const std::string stem = src_path.stem().string();
-  const std::string filename = stem + "_" + std::to_string(w) + "x" + std::to_string(h) + ".png";
+  const std::string filename =
+      stem + "_" + std::to_string(w) + "x" + std::to_string(h) + output_format_extension(output_format);
   return base_dir / filename;
 }
 
 static bool resize_selected_and_save(AppState& state) {
   if (!state.current_image.pixels || state.selected_index < 0 || state.selected_index >= static_cast<int>(state.files.size())) {
+    state.last_save_succeeded = false;
     state.status = "No image selected.";
     return false;
   }
 
   if (state.new_width <= 0 || state.new_height <= 0) {
+    state.last_save_succeeded = false;
     state.status = "Width and Height must be positive.";
     return false;
   }
@@ -454,6 +501,7 @@ static bool resize_selected_and_save(AppState& state) {
   Image resized = {0, 0, 0, nullptr};
   const int rc_resize = img_resize_rgba(&state.current_image, state.new_width, state.new_height, &resized);
   if (rc_resize != 0) {
+    state.last_save_succeeded = false;
     state.status = "Resize failed.";
     return false;
   }
@@ -462,31 +510,40 @@ static bool resize_selected_and_save(AppState& state) {
   const fs::path output_dir = get_output_dir(state);
   if (!ensure_directory_exists(output_dir, state.status)) {
     img_free(&resized);
+    state.last_save_succeeded = false;
     return false;
   }
 
-  const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height);
+  const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height, state.output_format);
   const std::string out_str = out.string();
 
-  const int rc_save = img_save_png(out_str.c_str(), &resized);
+  const int rc_save = img_save_with_format(
+      out_str.c_str(),
+      &resized,
+      static_cast<ImageFileFormat>(state.output_format),
+      state.jpg_quality);
   img_free(&resized);
 
   if (rc_save != 0) {
+    state.last_save_succeeded = false;
     state.status = "Save failed: " + out_str;
     return false;
   }
 
+  state.last_save_succeeded = true;
   state.status = "Saved: " + out.string();
   return true;
 }
 
 static void resize_all_and_save(AppState& state) {
   if (state.files.empty()) {
+    state.last_save_succeeded = false;
     state.status = "No image in the directory.";
     return;
   }
 
   if (state.new_width <= 0 || state.new_height <= 0) {
+    state.last_save_succeeded = false;
     state.status = "Width and Height must be positive.";
     return;
   }
@@ -495,6 +552,7 @@ static void resize_all_and_save(AppState& state) {
   int fail_count = 0;
   const fs::path output_dir = get_output_dir(state);
   if (!ensure_directory_exists(output_dir, state.status)) {
+    state.last_save_succeeded = false;
     return;
   }
 
@@ -516,10 +574,14 @@ static void resize_all_and_save(AppState& state) {
       continue;
     }
 
-    const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height);
+    const fs::path out = make_output_path(output_dir, src, state.new_width, state.new_height, state.output_format);
     const std::string out_str = out.string();
 
-    if (img_save_png(out_str.c_str(), &resized) == 0) {
+    if (img_save_with_format(
+            out_str.c_str(),
+            &resized,
+            static_cast<ImageFileFormat>(state.output_format),
+            state.jpg_quality) == 0) {
       ++success_count;
     } else {
       ++fail_count;
@@ -528,6 +590,7 @@ static void resize_all_and_save(AppState& state) {
     img_free(&resized);
   }
 
+  state.last_save_succeeded = (success_count > 0 && fail_count == 0);
   state.status = "Batch resize finished. success=" + std::to_string(success_count) + ", fail=" + std::to_string(fail_count);
 }
 
@@ -614,6 +677,22 @@ static void draw_ui(AppState& state) {
       set_output_input(state, selected_path);
     }
   }
+  ImGui::SetNextItemWidth(140.0f);
+  if (ImGui::BeginCombo("Format", output_format_label(state.output_format))) {
+    for (int format : {IMG_FORMAT_PNG, IMG_FORMAT_JPG, IMG_FORMAT_PDF}) {
+      const bool selected = (state.output_format == format);
+      if (ImGui::Selectable(output_format_label(format), selected)) {
+        state.output_format = format;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  if (state.output_format == IMG_FORMAT_JPG || state.output_format == IMG_FORMAT_PDF) {
+    ImGui::SliderInt("Quality", &state.jpg_quality, 1, 100);
+  }
   ImGui::InputInt("Width", &state.new_width);
   ImGui::InputInt("Height", &state.new_height);
 
@@ -631,6 +710,9 @@ static void draw_ui(AppState& state) {
 
   ImGui::Columns(1);
   ImGui::Separator();
+  if (state.last_save_succeeded) {
+    ImGui::TextColored(ImVec4(0.20f, 0.78f, 0.35f, 1.0f), "Save completed successfully.");
+  }
   ImGui::TextWrapped("Status: %s", state.status.c_str());
 
   ImGui::End();

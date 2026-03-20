@@ -107,6 +107,7 @@ endif()
 
 if(APPLE)
   target_compile_definitions(ImageTool PRIVATE GL_SILENCE_DEPRECATION)
+  target_link_libraries(image_core PRIVATE "-framework ApplicationServices")
 endif()
 
 if(WIN32)
