@@ -81,6 +81,9 @@ target_include_directories(image_core
 
 add_executable(ImageTool
   app/main.cpp
+  app/ui.cpp
+  app/file_dialogs.cpp
+  app/image_session.cpp
 )
 
 target_link_libraries(ImageTool
