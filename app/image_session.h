@@ -8,6 +8,7 @@ const char* output_format_label(int format);
 std::string display_name(const fs::path& path);
 void load_path(AppState& state, const fs::path& input_path);
 void load_paths(AppState& state, const std::vector<fs::path>& input_paths);
+void append_paths(AppState& state, const std::vector<fs::path>& input_paths);
 void load_selected_image(AppState& state, int index);
 void clear_current_image(AppState& state);
 bool resize_selected_and_save(AppState& state);

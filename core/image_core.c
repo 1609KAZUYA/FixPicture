@@ -14,6 +14,7 @@
 
 #if defined(__APPLE__)
 #  include <ApplicationServices/ApplicationServices.h>
+#  include <ImageIO/ImageIO.h>
 #endif
 
 // stb_image の実装本体をこの翻訳単位で有効化し、別の .c を用意せず画像読込関数を使えるようにします。 / Emit stb_image implementation in this translation unit so image loading functions become available without a separate .c file from stb.
@@ -195,6 +196,93 @@ static int img_pdf_write_text(FILE* file, long* offset, const char* text) {
 }
 
 #if defined(__APPLE__)
+// macOS では ImageIO で HEIC / HEIF などの CGImage 対応形式を RGBA へ展開します。 / On macOS, expand HEIC / HEIF and other CGImage-backed formats into RGBA via ImageIO.
+static int img_load_cgimage_rgba(const char* path, Image* out) {
+  CFURLRef url = NULL;
+  CGImageSourceRef source = NULL;
+  CGImageRef image = NULL;
+  CGColorSpaceRef color_space = NULL;
+  CGContextRef context = NULL;
+  uint8_t* data = NULL;
+
+  url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8*)path, (CFIndex)strlen(path), false);
+  if (!url) {
+    return -11;
+  }
+
+  source = CGImageSourceCreateWithURL(url, NULL);
+  if (!source) {
+    CFRelease(url);
+    return -12;
+  }
+
+  image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+  if (!image) {
+    CFRelease(source);
+    CFRelease(url);
+    return -13;
+  }
+
+  const int width = (int)CGImageGetWidth(image);
+  const int height = (int)CGImageGetHeight(image);
+  if (width <= 0 || height <= 0) {
+    CGImageRelease(image);
+    CFRelease(source);
+    CFRelease(url);
+    return -14;
+  }
+
+  const size_t bytes_per_row = (size_t)width * 4u;
+  data = (uint8_t*)calloc((size_t)height, bytes_per_row);
+  if (!data) {
+    CGImageRelease(image);
+    CFRelease(source);
+    CFRelease(url);
+    return -15;
+  }
+
+  color_space = CGColorSpaceCreateDeviceRGB();
+  if (!color_space) {
+    free(data);
+    CGImageRelease(image);
+    CFRelease(source);
+    CFRelease(url);
+    return -16;
+  }
+
+  context = CGBitmapContextCreate(
+      data,
+      (size_t)width,
+      (size_t)height,
+      8u,
+      bytes_per_row,
+      color_space,
+      kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+  if (!context) {
+    CGColorSpaceRelease(color_space);
+    free(data);
+    CGImageRelease(image);
+    CFRelease(source);
+    CFRelease(url);
+    return -17;
+  }
+
+  CGContextClearRect(context, CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height));
+  CGContextDrawImage(context, CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height), image);
+
+  out->w = width;
+  out->h = height;
+  out->channels = 4;
+  out->pixels = data;
+
+  CGContextRelease(context);
+  CGColorSpaceRelease(color_space);
+  CGImageRelease(image);
+  CFRelease(source);
+  CFRelease(url);
+  return 0;
+}
+
 // macOS では Quartz で PDF 1ページ目を RGBA へ描画します。 / On macOS, rasterize the first page of a PDF into RGBA via Quartz.
 static int img_load_pdf_rgba(const char* path, Image* out) {
   CFURLRef url = NULL;
@@ -296,6 +384,14 @@ int img_load_rgba(const char* path, Image* out) {
     return img_load_pdf_rgba(path, out);
 #else
     return -10;
+#endif
+  }
+
+  if (img_path_has_extension(path, ".heic") || img_path_has_extension(path, ".heif")) {
+#if defined(__APPLE__)
+    return img_load_cgimage_rgba(path, out);
+#else
+    return -11;
 #endif
   }
 

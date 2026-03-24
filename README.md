@@ -21,6 +21,7 @@ Dear ImGui + GLFW + OpenGL + stb で作る、クロスプラットフォーム�
 - `PNG`
 - `JPG / JPEG`
 - `PDF` (`macOS` では読込対応)
+- `HEIC / HEIF` (`macOS` では読込対応、保存は既存の `PNG / JPG / PDF` へ変換)
 
 保存ファイル名は `元ファイル名_幅x高さ.<拡張子>` です。
 
@@ -96,3 +97,4 @@ git push -u origin main
 - 巨大画像はメモリ使用量が増えるため、段階的な最適化が必要です。
 - `PDF` 保存は、リサイズ後画像を1ページPDFとして書き出します。
 - `PDF` 読込は現時点では `macOS` 実装を優先しており、Windows では今後PDFレンダラ統合が必要です。
+- `HEIC / HEIF` 読込も現時点では `macOS` 実装です。Windows では今後デコーダ統合が必要です。

@@ -82,7 +82,13 @@ bool is_supported_image(const fs::path& file_path) {
     return static_cast<char>(std::tolower(c));
   });
 
-  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga" || ext == ".pdf";
+  const bool common_supported =
+      ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga" || ext == ".pdf";
+#if defined(__APPLE__)
+  return common_supported || ext == ".heic" || ext == ".heif";
+#else
+  return common_supported;
+#endif
 }
 
 fs::path parse_user_path_input(const char* raw_input) {
@@ -208,26 +214,12 @@ static bool upload_to_texture(GLTexture& texture, const Image& img) {
   return true;
 }
 
-void load_path(AppState& state, const fs::path& input_path) {
-  load_paths(state, std::vector<fs::path>{input_path});
-}
-
-void load_paths(AppState& state, const std::vector<fs::path>& input_paths) {
-  state.files.clear();
-  state.selected_index = -1;
-  state.library_page = 0;
-  clear_current_image(state);
-
-  if (input_paths.empty()) {
-    state.last_save_succeeded = false;
-    state.status = "Path does not exist.";
-    return;
-  }
-
-  std::set<fs::path> collected;
-  bool included_directory = false;
-  fs::path first_valid_input;
-
+static std::vector<fs::path> collect_supported_paths(
+    const std::vector<fs::path>& input_paths,
+    bool& included_directory,
+    fs::path& first_valid_input) {
+  std::vector<fs::path> collected;
+  std::set<fs::path> seen;
   for (const fs::path& input_path : input_paths) {
     std::error_code ec;
     if (input_path.empty() || !fs::exists(input_path, ec) || ec) {
@@ -240,6 +232,7 @@ void load_paths(AppState& state, const std::vector<fs::path>& input_paths) {
 
     if (fs::is_directory(input_path, ec) && !ec) {
       included_directory = true;
+      std::vector<fs::path> directory_items;
       for (const auto& entry : fs::directory_iterator(input_path, ec)) {
         if (ec) {
           break;
@@ -249,7 +242,13 @@ void load_paths(AppState& state, const std::vector<fs::path>& input_paths) {
           continue;
         }
         if (is_supported_image(entry.path())) {
-          collected.insert(entry.path());
+          directory_items.push_back(entry.path());
+        }
+      }
+      std::sort(directory_items.begin(), directory_items.end());
+      for (const auto& item : directory_items) {
+        if (seen.insert(item).second) {
+          collected.push_back(item);
         }
       }
       continue;
@@ -257,30 +256,100 @@ void load_paths(AppState& state, const std::vector<fs::path>& input_paths) {
 
     ec.clear();
     if (fs::is_regular_file(input_path, ec) && !ec && is_supported_image(input_path)) {
-      collected.insert(input_path);
+      if (seen.insert(input_path).second) {
+        collected.push_back(input_path);
+      }
     }
   }
 
-  state.files.assign(collected.begin(), collected.end());
+  return collected;
+}
+
+static void update_source_summary(AppState& state) {
   if (state.files.empty()) {
-    state.last_save_succeeded = false;
-    state.status = "No supported images were found.";
+    std::snprintf(state.path_input, sizeof(state.path_input), "%s", "");
     return;
   }
 
-  state.current_dir = state.files.front().has_parent_path() ? state.files.front().parent_path() : fs::current_path();
-  if (included_directory && input_paths.size() == 1 && fs::is_directory(input_paths.front())) {
-    set_path_input(state, input_paths.front());
-  } else if (state.files.size() == 1) {
+  if (state.files.size() == 1) {
     set_path_input(state, state.files.front());
-  } else {
-    const std::string summary = std::to_string(state.files.size()) + " files selected";
-    std::snprintf(state.path_input, sizeof(state.path_input), "%s", summary.c_str());
+    return;
   }
-  set_output_input(state, default_output_dir(state));
+
+  const std::string summary = std::to_string(state.files.size()) + " files loaded";
+  std::snprintf(state.path_input, sizeof(state.path_input), "%s", summary.c_str());
+}
+
+static void merge_paths(AppState& state, const std::vector<fs::path>& input_paths, bool append) {
+  if (input_paths.empty()) {
+    state.last_save_succeeded = false;
+    state.status = "Path does not exist.";
+    return;
+  }
+
+  bool included_directory = false;
+  fs::path first_valid_input;
+  const std::vector<fs::path> collected = collect_supported_paths(input_paths, included_directory, first_valid_input);
+  if (collected.empty()) {
+    state.last_save_succeeded = false;
+    state.status = append ? "No new supported images were found." : "No supported images were found.";
+    return;
+  }
+
+  int first_new_index = 0;
+  if (!append) {
+    state.files.clear();
+    state.selected_index = -1;
+    state.library_page = 0;
+    clear_current_image(state);
+    state.files = collected;
+  } else {
+    std::set<fs::path> existing(state.files.begin(), state.files.end());
+    first_new_index = static_cast<int>(state.files.size());
+    int added_count = 0;
+    for (const auto& item : collected) {
+      if (existing.insert(item).second) {
+        state.files.push_back(item);
+        ++added_count;
+      }
+    }
+
+    if (added_count == 0) {
+      state.last_save_succeeded = false;
+      state.status = "All selected files are already loaded.";
+      update_source_summary(state);
+      return;
+    }
+  }
+
+  state.current_dir = state.files.front().has_parent_path() ? state.files.front().parent_path() : fs::current_path();
+  if (!append || parse_user_path_input(state.output_input).empty()) {
+    set_output_input(state, default_output_dir(state));
+  }
+  update_source_summary(state);
   state.last_save_succeeded = false;
-  load_selected_image(state, 0);
-  state.status = "Loaded " + std::to_string(state.files.size()) + " image(s). Selected: " + display_name(state.files.front());
+
+  if (!append || state.selected_index < 0 || state.selected_index >= static_cast<int>(state.files.size())) {
+    load_selected_image(state, append ? first_new_index : 0);
+  }
+
+  if (append) {
+    state.status = "Added files. Total: " + std::to_string(state.files.size());
+  } else {
+    state.status = "Loaded " + std::to_string(state.files.size()) + " image(s). Selected: " + display_name(state.files.front());
+  }
+}
+
+void load_path(AppState& state, const fs::path& input_path) {
+  load_paths(state, std::vector<fs::path>{input_path});
+}
+
+void load_paths(AppState& state, const std::vector<fs::path>& input_paths) {
+  merge_paths(state, input_paths, false);
+}
+
+void append_paths(AppState& state, const std::vector<fs::path>& input_paths) {
+  merge_paths(state, input_paths, true);
 }
 
 void load_selected_image(AppState& state, int index) {

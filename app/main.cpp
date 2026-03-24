@@ -32,7 +32,7 @@ static void drop_callback(GLFWwindow* window, int count, const char** paths) {
       input_paths.emplace_back(fs::path(paths[i]));
     }
   }
-  load_paths(*state, input_paths);
+  append_paths(*state, input_paths);
 }
 
 int main() {

@@ -34,10 +34,12 @@ constexpr float kMaxControlWidth = 420.0f;
 
 ImFont* g_font_regular = nullptr;
 ImFont* g_font_bold = nullptr;
+ImFont* g_font_japanese = nullptr;
 
+template <size_t N>
 bool try_load_base_font(
     ImGuiIO& io,
-    const std::array<const char*, 6>& candidates,
+    const std::array<const char*, N>& candidates,
     float size_pixels,
     ImFont*& out_font) {
   ImFontConfig config;
@@ -65,9 +67,10 @@ bool try_load_base_font(
   return false;
 }
 
+template <size_t N>
 bool try_merge_font(
     ImGuiIO& io,
-    const std::array<const char*, 6>& candidates,
+    const std::array<const char*, N>& candidates,
     float size_pixels,
     const ImWchar* glyph_ranges) {
   for (const char* path : candidates) {
@@ -82,9 +85,9 @@ bool try_merge_font(
 
     ImFontConfig config;
     config.MergeMode = true;
-    config.PixelSnapH = true;
     config.OversampleH = 1;
     config.OversampleV = 1;
+    config.PixelSnapH = true;
 
     if (io.Fonts->AddFontFromFileTTF(path, size_pixels, &config, glyph_ranges)) {
       return true;
@@ -116,6 +119,14 @@ void pop_bold_font() {
   if (g_font_bold) {
     ImGui::PopFont();
   }
+}
+
+ImFont* pick_filename_font(const std::string& text) {
+  (void)text;
+  if (g_font_regular) {
+    return g_font_regular;
+  }
+  return ImGui::GetFont();
 }
 
 void draw_background() {
@@ -197,7 +208,7 @@ void draw_open_buttons(AppState& state) {
   if (ImGui::Button("Open File", ImVec2(button_width, 38.0f))) {
     std::vector<fs::path> selected_paths;
     if (prompt_open_image_files(selected_paths)) {
-      load_paths(state, selected_paths);
+      append_paths(state, selected_paths);
     }
   }
 
@@ -205,19 +216,22 @@ void draw_open_buttons(AppState& state) {
   if (ImGui::Button("Open Folder", ImVec2(button_width, 38.0f))) {
     fs::path selected_path;
     if (prompt_select_image_directory(selected_path)) {
-      load_path(state, selected_path);
+      append_paths(state, std::vector<fs::path>{selected_path});
     }
   }
 }
 
 void draw_path_row(AppState& state) {
-  const float action_width = 110.0f;
-  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - action_width - ImGui::GetStyle().ItemSpacing.x);
-  ImGui::InputTextWithHint("##path", "File or folder path", state.path_input, IM_ARRAYSIZE(state.path_input));
-  ImGui::SameLine();
-  if (ImGui::Button("Load", ImVec2(action_width, 0.0f))) {
-    load_path(state, parse_user_path_input(state.path_input));
-  }
+  push_bold_font();
+  ImGui::TextColored(kTextBody, "Source");
+  pop_bold_font();
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint(
+      "##path",
+      "Use Open File, Open Folder, or drag and drop",
+      state.path_input,
+      IM_ARRAYSIZE(state.path_input),
+      ImGuiInputTextFlags_ReadOnly);
 }
 
 void draw_output_row(AppState& state) {
@@ -235,7 +249,7 @@ void draw_output_row(AppState& state) {
 }
 
 void draw_export_controls(AppState& state) {
-  if (ImGui::BeginTable("control_grid", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoPadInnerX)) {
+  if (ImGui::BeginTable("control_format_row", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadInnerX)) {
     ImGui::TableNextColumn();
     push_bold_font();
     ImGui::TextColored(kTextBody, "Format");
@@ -264,22 +278,29 @@ void draw_export_controls(AppState& state) {
     } else {
       ImGui::TextColored(kTextMuted, "Lossless");
     }
-
-    ImGui::TableNextColumn();
-    push_bold_font();
-    ImGui::TextColored(kTextBody, "Width");
-    pop_bold_font();
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputInt("##width", &state.new_width);
-
-    ImGui::TableNextColumn();
-    push_bold_font();
-    ImGui::TextColored(kTextBody, "Height");
-    pop_bold_font();
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputInt("##height", &state.new_height);
     ImGui::EndTable();
   }
+
+  const float group_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+  const ImVec2 start_pos = ImGui::GetCursorPos();
+
+  ImGui::BeginGroup();
+  push_bold_font();
+  ImGui::TextColored(kTextBody, "Width");
+  pop_bold_font();
+  ImGui::SetNextItemWidth(group_width);
+  ImGui::InputInt("##width", &state.new_width);
+  ImGui::EndGroup();
+
+  ImGui::SetCursorPos(ImVec2(start_pos.x + group_width + ImGui::GetStyle().ItemSpacing.x, start_pos.y));
+
+  ImGui::BeginGroup();
+  push_bold_font();
+  ImGui::TextColored(kTextBody, "Height");
+  pop_bold_font();
+  ImGui::SetNextItemWidth(group_width);
+  ImGui::InputInt("##height", &state.new_height);
+  ImGui::EndGroup();
 }
 
 void draw_resize_buttons(AppState& state) {
@@ -353,26 +374,27 @@ void draw_library_panel(AppState& state, float height) {
       name = state.files[static_cast<size_t>(i)].string();
     }
     ImGui::PushID(i);
+    ImFont* file_font = pick_filename_font(name);
+    if (file_font) {
+      ImGui::PushFont(file_font);
+    }
     const ImVec2 row_size(ImGui::GetContentRegionAvail().x, 42.0f);
-    ImGui::InvisibleButton("file_row", row_size);
-    const bool clicked = ImGui::IsItemClicked();
-    const bool hovered = ImGui::IsItemHovered();
+    const bool clicked = ImGui::Selectable("##file_row", selected, 0, row_size);
     const ImVec2 row_min = ImGui::GetItemRectMin();
     const ImVec2 row_max = ImGui::GetItemRectMax();
-    const ImU32 text_color = ImGui::ColorConvertFloat4ToU32(selected ? kTextStrong : kTextBody);
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    const ImU32 fill_color = selected
-        ? IM_COL32(104, 74, 220, 180)
-        : (hovered ? IM_COL32(72, 58, 132, 110) : IM_COL32(48, 40, 92, 72));
-    draw_list->AddRectFilled(row_min, row_max, fill_color, 14.0f);
+    const ImU32 text_color = ImGui::ColorConvertFloat4ToU32(selected ? kTextStrong : kTextBody);
     draw_list->PushClipRect(row_min, row_max, true);
     draw_list->AddText(
-        g_font_regular ? g_font_regular : ImGui::GetFont(),
-        g_font_regular ? g_font_regular->FontSize : ImGui::GetFontSize(),
+        file_font ? file_font : ImGui::GetFont(),
+        file_font ? file_font->FontSize : ImGui::GetFontSize(),
         ImVec2(row_min.x + 14.0f, row_min.y + 10.0f),
         text_color,
         name.c_str());
     draw_list->PopClipRect();
+    if (file_font) {
+      ImGui::PopFont();
+    }
     ImGui::PopID();
     if (clicked) {
       load_selected_image(state, i);
@@ -397,7 +419,15 @@ void draw_preview_panel(const AppState& state, float height) {
   draw_eyebrow("PREVIEW");
   draw_title("Current image");
   if (state.selected_index >= 0 && state.selected_index < static_cast<int>(state.files.size())) {
-    draw_caption(display_name(state.files[static_cast<size_t>(state.selected_index)]).c_str());
+    const std::string name = display_name(state.files[static_cast<size_t>(state.selected_index)]);
+    ImFont* file_font = pick_filename_font(name);
+    if (file_font) {
+      ImGui::PushFont(file_font);
+    }
+    draw_caption(name.c_str());
+    if (file_font) {
+      ImGui::PopFont();
+    }
   } else {
     draw_caption("The selected file appears here.");
   }
@@ -452,9 +482,9 @@ void configure_ui_fonts(ImGuiIO& io) {
   const std::array<const char*, 6> regular_candidates = {
 #if defined(__APPLE__)
       "/System/Library/Fonts/SFNS.ttf",
-      "/System/Library/Fonts/SFNSRounded.ttf",
+      "/System/Library/Fonts/Avenir Next.ttc",
+      "/System/Library/Fonts/HelveticaNeue.ttc",
       "/System/Library/Fonts/Supplemental/Arial.ttf",
-      "/System/Library/Fonts/Supplemental/Helvetica.ttc",
 #elif defined(_WIN32)
       "C:/Windows/Fonts/segoeui.ttf",
       "C:/Windows/Fonts/arial.ttf",
@@ -467,9 +497,10 @@ void configure_ui_fonts(ImGuiIO& io) {
 
   const std::array<const char*, 6> bold_candidates = {
 #if defined(__APPLE__)
+      "/System/Library/Fonts/SFNSRounded.ttf",
       "/System/Library/Fonts/SFNS.ttf",
+      "/System/Library/Fonts/Avenir Next.ttc",
       "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-      "/System/Library/Fonts/Supplemental/Helvetica Bold.ttf",
 #elif defined(_WIN32)
       "C:/Windows/Fonts/seguisb.ttf",
       "C:/Windows/Fonts/arialbd.ttf",
@@ -477,7 +508,6 @@ void configure_ui_fonts(ImGuiIO& io) {
       "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
 #endif
-      nullptr,
       nullptr,
       nullptr};
 
@@ -497,9 +527,10 @@ void configure_ui_fonts(ImGuiIO& io) {
   if (!g_font_bold) {
     g_font_bold = g_font_regular;
   }
+
   io.FontDefault = g_font_regular;
 
-  const ImWchar* glyph_ranges = io.Fonts->GetGlyphRangesJapanese();
+  const ImWchar* japanese_ranges = io.Fonts->GetGlyphRangesJapanese();
   const std::array<const char*, 6> japanese_candidates = {
 #if defined(__APPLE__)
       "/System/Library/Fonts/Supplemental/NotoSansGothic-Regular.ttf",
@@ -510,12 +541,12 @@ void configure_ui_fonts(ImGuiIO& io) {
       "C:/Windows/Fonts/YuGothM.ttc",
       "C:/Windows/Fonts/msgothic.ttc",
 #else
-      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-      "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 #endif
       nullptr,
       nullptr};
-  try_merge_font(io, japanese_candidates, 20.0f, glyph_ranges);
+  try_merge_font(io, japanese_candidates, 20.0f, japanese_ranges);
+  g_font_japanese = g_font_regular;
 }
 
 void apply_ui_theme() {
