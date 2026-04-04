@@ -72,7 +72,12 @@ bool try_merge_font(
     ImGuiIO& io,
     const std::array<const char*, N>& candidates,
     float size_pixels,
-    const ImWchar* glyph_ranges) {
+    const ImWchar* glyph_ranges,
+    ImFont* destination_font) {
+  if (!destination_font) {
+    return false;
+  }
+
   for (const char* path : candidates) {
     if (!path) {
       continue;
@@ -85,6 +90,7 @@ bool try_merge_font(
 
     ImFontConfig config;
     config.MergeMode = true;
+    config.DstFont = destination_font;
     config.OversampleH = 1;
     config.OversampleV = 1;
     config.PixelSnapH = true;
@@ -545,7 +551,10 @@ void configure_ui_fonts(ImGuiIO& io) {
 #endif
       nullptr,
       nullptr};
-  try_merge_font(io, japanese_candidates, 20.0f, japanese_ranges);
+  try_merge_font(io, japanese_candidates, 20.0f, japanese_ranges, g_font_regular);
+  if (g_font_bold && g_font_bold != g_font_regular) {
+    try_merge_font(io, japanese_candidates, 22.0f, japanese_ranges, g_font_bold);
+  }
   g_font_japanese = g_font_regular;
 }
 
