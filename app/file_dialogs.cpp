@@ -1,3 +1,14 @@
+// ネイティブファイルダイアログの実装です。
+// プリプロセッサで Windows / macOS / その他 の 3 つのブロックに分かれています。
+//
+// Windows: Win32 の GetOpenFileNameW（ファイル選択）と
+//          SHBrowseForFolderW（フォルダ選択）を使います。
+//          wchar_t（ワイド文字）を UTF-8 に変換して fs::path で返します。
+//
+// macOS  : popen + osascript（AppleScript）でダイアログを起動し、
+//          標準出力から POSIX パスを読み取ります。
+//
+// その他 : ダイアログ非対応のため、すべて false を返すスタブです。
 #include "file_dialogs.h"
 
 #include <cctype>
@@ -13,6 +24,8 @@
 #  include <shlobj.h>
 #endif
 
+// 文字列の前後にある空白を除去したコピーを返します。
+// osascript の出力末尾に改行が付くため、macOS 側で使います。
 static std::string trim_copy(const std::string& text) {
   size_t start = 0;
   while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
@@ -27,7 +40,13 @@ static std::string trim_copy(const std::string& text) {
   return text.substr(start, end - start);
 }
 
+// ================================================================
+// Windows 実装
+// ================================================================
 #if defined(_WIN32)
+
+// Win32 のワイド文字列を UTF-8 の std::string へ変換します。
+// WideCharToMultiByte でバッファサイズを 2 回求める標準手順です。
 static std::string wide_to_utf8(const wchar_t* value) {
   if (!value || value[0] == L'\0') {
     return std::string();
@@ -43,6 +62,10 @@ static std::string wide_to_utf8(const wchar_t* value) {
   return result;
 }
 
+// GetOpenFileNameW で複数ファイル選択ダイアログを表示します。
+// OFN_ALLOWMULTISELECT 時のバッファ形式:
+//   [フォルダパス\0ファイル名1\0ファイル名2\0\0] (複数選択)
+//   [フルパス\0\0]                              (単一選択)
 bool prompt_open_image_files(std::vector<fs::path>& out_paths) {
   static const wchar_t kFilter[] =
       L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.pdf\0All Files\0*.*\0";
@@ -66,10 +89,12 @@ bool prompt_open_image_files(std::vector<fs::path>& out_paths) {
   current += first_entry.size() + 1;
 
   if (*current == L'\0') {
+    // 単一ファイル選択の場合: バッファにフルパスが直接入っています。
     out_paths.emplace_back(fs::path(wide_to_utf8(first_entry.c_str())));
     return !out_paths.empty();
   }
 
+  // 複数ファイル選択の場合: 先頭がディレクトリ、以降がファイル名です。
   const fs::path base_dir = fs::path(wide_to_utf8(first_entry.c_str()));
   while (*current != L'\0') {
     out_paths.emplace_back(base_dir / wide_to_utf8(current));
@@ -89,6 +114,8 @@ bool prompt_open_image_file(fs::path& out_path) {
   return true;
 }
 
+// SHBrowseForFolderW でフォルダ選択ダイアログを表示します。
+// COM を初期化してから呼び出し、終了後に CoUninitialize します。
 static bool prompt_select_directory(fs::path& out_path, const wchar_t* title) {
   HRESULT init_result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   const bool should_uninit = SUCCEEDED(init_result);
@@ -107,7 +134,7 @@ static bool prompt_select_directory(fs::path& out_path, const wchar_t* title) {
 
   wchar_t buffer[MAX_PATH] = L"";
   const BOOL ok = SHGetPathFromIDListW(item, buffer);
-  CoTaskMemFree(item);
+  CoTaskMemFree(item);  // Shell が確保したメモリを解放します。
 
   if (should_uninit) {
     CoUninitialize();
@@ -128,7 +155,14 @@ bool prompt_select_image_directory(fs::path& out_path) {
 bool prompt_select_output_directory(fs::path& out_path) {
   return prompt_select_directory(out_path, L"Select output folder");
 }
+
+// ================================================================
+// macOS 実装
+// ================================================================
 #elif defined(__APPLE__)
+
+// popen で osascript を起動し、標準出力を文字列として読み取ります。
+// ダイアログがキャンセルされた場合や失敗した場合は空文字列を返します。
 static std::string run_command_and_capture(const char* command) {
   if (!command) {
     return std::string();
@@ -148,6 +182,8 @@ static std::string run_command_and_capture(const char* command) {
   return trim_copy(output);
 }
 
+// AppleScript で複数ファイル選択ダイアログを表示し、POSIX パスの改行区切りリストを取得します。
+// 取得したリストを行ごとに分割して out_paths へ格納します。
 bool prompt_open_image_files(std::vector<fs::path>& out_paths) {
   const std::string result = run_command_and_capture(
       "osascript <<'APPLESCRIPT'\n"
@@ -189,6 +225,8 @@ bool prompt_open_image_file(fs::path& out_path) {
   return true;
 }
 
+// AppleScript の "choose folder" でフォルダ選択ダイアログを表示します。
+// 選択された POSIX パスを out_path に格納します。
 static bool prompt_select_directory(fs::path& out_path, const char* title) {
   const std::string prompt = title ? title : "Select a folder";
   const std::string command =
@@ -209,7 +247,12 @@ bool prompt_select_image_directory(fs::path& out_path) {
 bool prompt_select_output_directory(fs::path& out_path) {
   return prompt_select_directory(out_path, "Select output folder");
 }
+
+// ================================================================
+// その他プラットフォーム（Linux など）スタブ実装
+// ================================================================
 #else
+// ダイアログが未実装のため、すべて何もせずに false を返します。
 bool prompt_open_image_file(fs::path& out_path) {
   (void)out_path;
   return false;
